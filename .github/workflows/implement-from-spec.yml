@@ -1,0 +1,107 @@
+name: Implement from spec
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install anthropic SDK
+        run: pip install anthropic
+
+      - name: Generate githubHello.py from spec.md
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python - <<'EOF'
+          import os
+          import sys
+          import anthropic
+
+          spec_path = "spec.md"
+          output_path = "githubHello.py"
+
+          # Read spec.md
+          try:
+              with open(spec_path, encoding="utf-8") as f:
+                  spec_content = f.read()
+          except FileNotFoundError:
+              print(f"ERROR: {spec_path} not found in repo root", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"Read {len(spec_content)} characters from {spec_path}")
+
+          # Call Claude Haiku API
+          client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+          message = client.messages.create(
+              model="claude-haiku-4-5-20251001",
+              max_tokens=4096,
+              messages=[
+                  {
+                      "role": "user",
+                      "content": (
+                          "Read the following specification and write ONLY raw Python code "
+                          "that implements it. Do NOT include any markdown code fences, "
+                          "explanations, or commentary. Output only valid Python source code.\n\n"
+                          f"SPECIFICATION:\n{spec_content}"
+                      ),
+                  }
+              ],
+          )
+
+          raw_code = message.content[0].text
+
+          # Strip markdown fences if the model included them
+          lines = raw_code.splitlines()
+          cleaned_lines = []
+          inside_fence = False
+          for line in lines:
+              stripped = line.strip()
+              if stripped.startswith("```"):
+                  inside_fence = not inside_fence
+                  continue
+              cleaned_lines.append(line)
+
+          # If no fence was found, use the raw output as-is
+          if not any(l.strip().startswith("```") for l in lines):
+              cleaned_code = raw_code
+          else:
+              cleaned_code = "\n".join(cleaned_lines)
+
+          # Remove leading/trailing blank lines
+          cleaned_code = cleaned_code.strip() + "\n"
+
+          # Write to githubHello.py
+          with open(output_path, "w", encoding="utf-8") as f:
+              f.write(cleaned_code)
+
+          print(f"Written {len(cleaned_code)} characters to {output_path}")
+          print("--- generated file content ---")
+          print(cleaned_code)
+          print("--- end of generated file ---")
+          EOF
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit and push githubHello.py
+        run: |
+          git add githubHello.py
+          git commit -m "自動生成：根據 spec.md 實作 githubHello.py" || echo "No changes to commit"
+          git push

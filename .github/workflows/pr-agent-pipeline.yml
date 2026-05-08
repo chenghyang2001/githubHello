@@ -1,0 +1,144 @@
+name: PR Agent Pipeline
+
+# 觸發時機：PR 開啟或同步（push 新 commit 到 PR branch）
+# 流程：classify (Haiku) → resolver (Sonnet) → qa (Sonnet)
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+# 權限：resolver 需要 push 到 PR branch（contents: write），三個 job 都要留 PR 留言（pull-requests: write）
+permissions:
+  contents: write
+  pull-requests: write
+
+# 同 PR 連續 push 時取消前一輪，避免 race condition 或重複留言
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# 模型版本集中在 workflow level，方便日後升級
+env:
+  CLASSIFY_MODEL: claude-haiku-4-5-20251001
+  RESOLVER_MODEL: claude-sonnet-4-6
+  QA_MODEL: claude-sonnet-4-6
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    # 安全防線：只跑同 repo 的 PR（fork 來的 PR 不會拿到 secrets，避免 pwn 風險）
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    outputs:
+      mode: ${{ steps.classify.outputs.mode }}
+      skip: ${{ steps.bot_guard.outputs.skip }}
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          fetch-depth: 0
+
+      - name: Bot-loop guard
+        id: bot_guard
+        # 若 PR 最後一個 commit 是 github-actions[bot] 推的，代表是 resolver 自己的 commit，整條 pipeline 直接跳過避免無限迴圈
+        run: |
+          LAST_AUTHOR=$(git log -1 --format='%an' HEAD)
+          echo "Last commit author: $LAST_AUTHOR"
+          if [ "$LAST_AUTHOR" = "github-actions[bot]" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Detected bot commit — skipping entire pipeline to prevent loop"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        if: steps.bot_guard.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        if: steps.bot_guard.outputs.skip != 'true'
+        run: pip install 'anthropic==0.40.*'
+
+      - name: Classify PR intent
+        id: classify
+        if: steps.bot_guard.outputs.skip != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CLASSIFY_MODEL: ${{ env.CLASSIFY_MODEL }}
+        run: python scripts/classify_pr.py
+
+  resolver:
+    runs-on: ubuntu-latest
+    needs: classify
+    # 同 repo 守衛 + bot-loop guard 雙重檢查
+    if: github.event.pull_request.head.repo.full_name == github.repository && needs.classify.outputs.skip != 'true'
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          fetch-depth: 0
+          # 用 GITHUB_TOKEN 讓後續 git push 帶權限
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install 'anthropic==0.40.*'
+
+      - name: Configure git for bot commits
+        # github-actions[bot] 的標準 email 寫法（GitHub 官方推薦）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run resolver agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MODE: ${{ needs.classify.outputs.mode }}
+          GITHUB_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          RESOLVER_MODEL: ${{ env.RESOLVER_MODEL }}
+        run: python scripts/resolver_agent.py
+
+  qa:
+    runs-on: ubuntu-latest
+    # qa 引用 needs.classify.outputs.skip，所以 needs 要含 classify 才合法
+    needs: [classify, resolver]
+    # 同 repo 守衛 + bot-loop guard 雙重檢查
+    if: github.event.pull_request.head.repo.full_name == github.repository && needs.classify.outputs.skip != 'true'
+    steps:
+      - name: Checkout PR head (post-resolver)
+        uses: actions/checkout@v4
+        with:
+          # resolver 已 push 新 commit，這裡重新拉最新 PR branch 才能跑到 resolver 改完的程式碼
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        # QA 需要 pytest 跑測試，紅燈不阻擋 workflow（純留言提示）
+        run: pip install 'anthropic==0.40.*' 'pytest==8.*'
+
+      - name: Run QA agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          QA_MODEL: ${{ env.QA_MODEL }}
+        # || true 確保紅燈測試不會讓 workflow 失敗（設計上只發 PR 留言不擋 merge）
+        run: python scripts/qa_agent.py || true

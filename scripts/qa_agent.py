@@ -5,6 +5,7 @@
 跑 pytest 收集結果，把結果以摺疊區塊留言到 PR。
 紅燈不阻擋 workflow（透過 workflow 的 || true 達成）。
 """
+import json
 import os
 import re
 import subprocess
@@ -16,27 +17,69 @@ import anthropic
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT_PATH = REPO_ROOT / "githubHello.py"
-TEST_PATH = REPO_ROOT / "test_githubHello.py"
+
+
+def load_pipeline_config() -> dict:
+    """從 repo root 讀 pipeline.config.json，缺檔時回退到 githubHello 預設值。
+
+    回傳字典含五個 key：spec_file / implementation_target / test_target /
+    language / run_command。設計目的是讓本流程能跨 repo 重用，而不必綁死
+    spec.md / githubHello.py 這對檔名。
+    """
+    config_path = REPO_ROOT / "pipeline.config.json"
+    if config_path.exists():
+        return json.loads(config_path.read_text(encoding="utf-8"))
+    # Legacy fallback：保留與重構前完全一致的行為，避免新 checkout 沒帶 config 就壞掉
+    return {
+        "spec_file": "spec.md",
+        "implementation_target": "githubHello.py",
+        "test_target": "test_githubHello.py",
+        "language": "python",
+        "run_command": ["python", "githubHello.py"],
+    }
+
+
+CONFIG = load_pipeline_config()
+SCRIPT_PATH = REPO_ROOT / CONFIG["implementation_target"]
+TEST_PATH = REPO_ROOT / CONFIG["test_target"]
 
 
 def read_target_script() -> str:
-    """讀 resolver 改完後的 githubHello.py（QA job checkout 已是最新 PR head）。"""
+    """讀 resolver 改完後的實作檔（QA job checkout 已是最新 PR head）。"""
     if not SCRIPT_PATH.exists():
-        raise FileNotFoundError(f"githubHello.py not found at {SCRIPT_PATH}")
+        raise FileNotFoundError(
+            f"{CONFIG['implementation_target']} not found at {SCRIPT_PATH}"
+        )
     return SCRIPT_PATH.read_text(encoding="utf-8")
 
 
 def call_qa(code: str, model: str) -> str:
-    """請 Sonnet 產出測試檔內容（純 Python，不要 markdown）。"""
+    """請 Sonnet 產出測試檔內容（純 Python，不要 markdown）。
+
+    Prompt 中的 language / test_target / run_command 由 pipeline.config.json 決定，
+    讓本流程能套用到不同 repo（不一定是 python + githubHello.py）。
+    """
     client = anthropic.Anthropic()
+    # 把 run_command 第一個元素（解譯器名）替換成 sys.executable，保留其餘參數。
+    # 例如 ["python", "githubHello.py"] → "[sys.executable, 'githubHello.py']"
+    # 這樣即使 config 寫 "python"，產出的測試也能在沒有 python 在 PATH 的環境下跑。
+    # 防禦性處理 run_command 只有 1 個元素的邊界（例：["python"] 沒帶腳本參數），
+    # 避免產出 "[sys.executable, ]" 這種雖然合法但醜的字串。
+    extra = CONFIG["run_command"][1:]
+    if extra:
+        run_cmd_repr = "[sys.executable, " + ", ".join(repr(a) for a in extra) + "]"
+    else:
+        run_cmd_repr = "[sys.executable]"
+    language = CONFIG["language"]
+    test_target = CONFIG["test_target"]
+    impl_target = CONFIG["implementation_target"]
     prompt = (
-        "Read this Python script and write a `test_githubHello.py` containing EXACTLY 2 "
+        f"Read this {language} script and write a `{test_target}` containing EXACTLY 2 "
         "pytest test cases: (1) a normal/happy-path case named test_normal_*, "
         "(2) an edge case named test_edge_*. "
-        "Use `subprocess.run([sys.executable, 'githubHello.py'], capture_output=True, text=True)` "
+        f"Use `subprocess.run({run_cmd_repr}, capture_output=True, text=True, cwd=repo_root)` "
         "and assert on stdout. Return ONLY the raw Python code, no markdown fences, no commentary.\n\n"
-        f"=== githubHello.py ===\n{code}\n"
+        f"=== {impl_target} ===\n{code}\n"
     )
     response = client.messages.create(
         model=model,
@@ -76,8 +119,12 @@ def write_test_file(content: str) -> None:
 
 def run_pytest() -> tuple[int, str]:
     """跑 pytest，回傳 (exit_code, combined_output)。stderr 合併進 stdout 方便讀。"""
+    # 用相對於 REPO_ROOT 的路徑，避免 test_target 在子目錄（例：pipeline-demo/test_x.py）
+    # 時 TEST_PATH.name 只剩 filename，pytest 從 cwd=REPO_ROOT 找不到檔。
+    # 把 \ 轉成 /，pytest 兩種都吃但 / 跑出來的 log 比較乾淨（避免 Windows 雙反斜線）。
+    test_rel = str(TEST_PATH.relative_to(REPO_ROOT)).replace("\\", "/")
     result = subprocess.run(
-        ["pytest", str(TEST_PATH), "-v", "--tb=short"],
+        ["pytest", test_rel, "-v", "--tb=short"],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -148,7 +195,7 @@ def main() -> None:
     print(f"QA agent running on PR #{pr_number} (model={model})")
 
     code = read_target_script()
-    print(f"Loaded githubHello.py ({len(code)} chars)")
+    print(f"Loaded {CONFIG['implementation_target']} ({len(code)} chars)")
 
     raw = call_qa(code, model)
     test_code = strip_markdown_fences(raw)

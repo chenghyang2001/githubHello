@@ -1,0 +1,7 @@
+{
+  "spec_file": "spec.md",
+  "implementation_target": "githubHello.py",
+  "test_target": "test_githubHello.py",
+  "language": "python",
+  "run_command": ["python", "githubHello.py"]
+}

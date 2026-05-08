@@ -1,0 +1,79 @@
+name: Test githubHello
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'githubHello.py'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check file exists
+        run: |
+          if [ ! -f "githubHello.py" ]; then
+            echo "ERROR: githubHello.py not found in the repository."
+            exit 1
+          fi
+          echo "githubHello.py found."
+
+      - name: Run and verify output
+        run: |
+          python - <<'EOF'
+          import subprocess
+          import re
+          import sys
+
+          # 執行目標腳本，捕獲輸出（強制 UTF-8 避免編碼問題）
+          result = subprocess.run(
+              ["python", "githubHello.py"],
+              capture_output=True,
+              text=True,
+              encoding="utf-8",
+          )
+
+          # 非零返回碼代表腳本本身執行失敗
+          if result.returncode != 0:
+              print("ERROR: githubHello.py exited with non-zero return code.")
+              print("stderr:", result.stderr)
+              sys.exit(1)
+
+          output = result.stdout
+          print("--- Captured output ---")
+          print(output)
+          print("--- End of output ---")
+
+          # 記錄每個檢查的結果
+          all_passed = True
+
+          # Check 1: 確認問候訊息存在
+          if "Hello from githubHello!" in output:
+              print("✅ Check 1 PASSED: Greeting line found.")
+          else:
+              print("❌ Check 1 FAILED: 'Hello from githubHello!' not found in output.")
+              all_passed = False
+
+          # Check 2: 確認日期時間格式符合 YYYY-MM-DD HH:MM:SS
+          if re.search(r"Current date and time: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", output):
+              print("✅ Check 2 PASSED: Datetime format is correct.")
+          else:
+              print("❌ Check 2 FAILED: Datetime pattern not found in output.")
+              all_passed = False
+
+          # 任何檢查失敗則整體失敗
+          if not all_passed:
+              print("\nSummary: One or more checks FAILED.")
+              sys.exit(1)
+
+          print("\nAll checks PASSED")
+          EOF

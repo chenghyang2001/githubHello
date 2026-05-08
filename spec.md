@@ -10,14 +10,15 @@
 - 輸出文字：`Hello from githubHello!`
 
 ### 輸出 2：目前日期時間
-- 使用 Python 標準函式庫 `datetime` 模組
-- 格式：`Current date and time: YYYY-MM-DD HH:MM:SS`
+- 使用 Python 標準函式庫 `datetime` 模組（含 `timezone` 與 `timedelta`，無需安裝外部套件）
+- 時區：台灣時間（GMT+8）
+- 格式：`Current date and time: YYYY-MM-DD HH:MM:SS (GMT+8)`
 
 ## 範例輸出
 
 ```
 Hello from githubHello!
-Current date and time: 2026-05-08 10:30:45
+Current date and time: 2026-05-08 10:30:45 (GMT+8)
 ```
 
 ## 技術規格

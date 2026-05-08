@@ -21,6 +21,19 @@ Hello from githubHello!
 Current date and time: 2026-05-08 10:30:45 (GMT+8)
 ```
 
+### 功能 3：除法函式
+- 定義函式 `div(a, b)`，回傳 `a` 除以 `b` 的浮點數結果
+- 在主程式中呼叫 `div(4, 2)` 並輸出結果
+- 格式：`Result: 4 / 2 = 2.0`
+
+## 完整範例輸出
+
+```
+Hello from githubHello!
+Current date and time: 2026-05-08 10:30:45 (GMT+8)
+Result: 4 / 2 = 2.0
+```
+
 ## 技術規格
 
 - 語言：Python 3
